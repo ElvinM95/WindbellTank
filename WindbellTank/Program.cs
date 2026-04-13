@@ -2,6 +2,7 @@
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Linq;
@@ -46,10 +47,23 @@ namespace WindbellTest
 
     class Program
     {
+        private static bool _tableEnsured = false;
+        private static readonly CancellationTokenSource _cts = new CancellationTokenSource();
+        private static string _lastAtgDataCache = null; // YENİ: Eyni datanın təkrar-təkrar bazaya yazılmasının qarşısını alacaq yaddaş
+
+        // Gələcəkdə mesajları vahid formatda çıxarmaq üçün loqlama funksiyası (Vaqt göstəricisi ilə)
+        static void Log(string message, ConsoleColor color = ConsoleColor.White)
+        {
+            Console.ForegroundColor = color;
+            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}");
+            Console.ResetColor();
+        }
+
         static string GetConnectionString()
         {
             string machineName = Environment.MachineName;
-            return $"Server={machineName};Database=ofisServer;User Id=sa;Password=374474;Encrypt=False;";
+            // Xətaya düşməməsi üçün Connection Timeout parametrini əlavə edirik (Uzun müddət gözləməməsi üçün)
+            return $"Server={machineName};Database=ofisServer;User Id=sa;Password=374474;Encrypt=False;Connection Timeout=10;";
         }
 
         static int GetTankCountFromDatabase()
@@ -64,16 +78,17 @@ namespace WindbellTest
                         var res = cmd.ExecuteScalar();
                         if (res != null && res != DBNull.Value)
                         {
-                            return Convert.ToInt32(res);
+                            int count = Convert.ToInt32(res);
+                            if (count > 0) return count;
                         }
                     }
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[\u26A0] Verilənlər bazasından çən sayı oxunarkən xəta: {ex.Message}");
+                Log($"\u26A0 Verilənlər bazasından çən sayı oxunarkən xəta: {ex.Message}", ConsoleColor.Yellow);
             }
-            return 0;
+            return 1; // Default - Heç nə tapılmazsa 1 qayıdırıq ki, xəta atmasın və ən azı 1 çəni yoxlasın.
         }
 
         static string GetIpFromDatabase()
@@ -83,6 +98,7 @@ namespace WindbellTest
                 using (var conn = new SqlConnection(GetConnectionString()))
                 {
                     conn.Open();
+                    // SQL Injection və yaza bağlı problemləri önləmək üçün 'isnull' və 'len' istifadə edilir
                     using (var cmd = new SqlCommand("SELECT TOP 1 ip FROM TankConfig WHERE len(isnull(ip, '')) > 0", conn))
                     {
                         var res = cmd.ExecuteScalar();
@@ -95,7 +111,7 @@ namespace WindbellTest
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[\u26A0] Verilənlər bazasından məlumat oxunarkən xəta: {ex.Message}");
+                Log($"\u26A0 Verilənlər bazasından məlumat oxunarkən xəta: {ex.Message}", ConsoleColor.Yellow);
             }
             return null;
         }
@@ -104,61 +120,60 @@ namespace WindbellTest
         {
             try
             {
-                // SQL-dən gələ biləcək problemlərin (sqlinjection və ya dırnaq xətaları) qarşısını almaq üçün təhlükəsizləşdiririk
-                string safeIp = newIp.Replace("'", "''");
                 string connString = GetConnectionString();
-                
-                Console.WriteLine($"[INFO] SQL Serverə qoşulur: {connString}");
+                Log($"SQL Serverə qoşulur (IP yeniləmək üçün)...", ConsoleColor.Cyan);
 
                 using (var conn = new SqlConnection(connString))
                 {
                     conn.Open();
-                    // SQL Server 2005-də parametrlərlə bağlı mümkün problemləri (NVARCHAR çevirmələri) istisna etmək üçün inline SQL istifadə edirik
-                    string updateSql = $"UPDATE TankConfig SET ip = '{safeIp}'";
+                    // GƏLƏCƏYƏ DÖNÜK DÜZƏLİŞ: Parametrizə edilmiş SQL (SQL Injection qarşısını alır və təhlükəsizdir)
+                    string updateSql = "UPDATE TankConfig SET ip = @ip";
                     using (var cmd = new SqlCommand(updateSql, conn))
                     {
+                        cmd.Parameters.AddWithValue("@ip", newIp);
                         int rows = cmd.ExecuteNonQuery();
+                        
                         if (rows == 0)
                         {
-                            // Əgər cədvəl tamamilə boşdursa, UPDATE 0 sətirə təsir edir.
-                            string insertSql = $"INSERT INTO TankConfig (ip) VALUES ('{safeIp}')";
+                            // Əgər cədvəl tamamilə boşdursa
+                            string insertSql = "INSERT INTO TankConfig (ip) VALUES (@ip)";
                             using (var insertCmd = new SqlCommand(insertSql, conn))
                             {
+                                insertCmd.Parameters.AddWithValue("@ip", newIp);
                                 int inserted = insertCmd.ExecuteNonQuery();
-                                Console.WriteLine($"[\u2714] Cədvəl boş idi, {inserted} yeni sətir əlavə olundu və IP yazıldı: {newIp}");
+                                Log($"\u2714 Cədvəl boş idi, {inserted} yeni sətir əlavə olundu və IP yazıldı: {newIp}", ConsoleColor.Green);
                             }
                         }
                         else
                         {
-                            Console.WriteLine($"[\u2714] IP ünvan bazada olan bütün {rows} sətrə '{newIp}' olaraq uğurla yazıldı.");
+                            Log($"\u2714 IP ünvan bazada olan bütün {rows} sətrə '{newIp}' olaraq uğurla yeniləndi.", ConsoleColor.Green);
                         }
                     }
                 }
             }
             catch (Exception ex)
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"\n=========================================");
-                Console.WriteLine($"[\u26A0] DİQQƏT! VERİLƏNLƏR BAZASINA YAZILARKƏN XƏTA BAŞ VERDİ!");
-                Console.WriteLine($"Xəta mesajı: {ex.Message}");
-                Console.WriteLine($"Səbəb ola bilər: Cədvəl yoxdur, icazə yoxdur, və ya Server Adı səhvdir.");
-                Console.WriteLine($"=========================================\n");
-                Console.ResetColor();
-                Console.WriteLine("Zəhmət olmasa xətanı oxuyun və davam etmək üçün ENTER basın...");
-                Console.ReadLine();
+                Console.WriteLine();
+                Log("=========================================", ConsoleColor.Red);
+                Log($"\u26A0 DİQQƏT! VERİLƏNLƏR BAZASINA IP YAZILARKƏN XƏTA BAŞ VERDİ!", ConsoleColor.Red);
+                Log($"Xəta mesajı: {ex.Message}", ConsoleColor.Red);
+                Log($"Səbəb ola bilər: Cədvəl yoxdur, icazə yoxdur, və ya Server Adı səhvdir.", ConsoleColor.Red);
+                Log("=========================================", ConsoleColor.Red);
+                Console.WriteLine();
             }
         }
 
-        static void SaveAtgDataToDatabase(AtgResponse response)
+        static void EnsureDatabaseTables()
         {
-            if (response == null || response.data == null) return;
+            // Təkrarçılığın qarşısını almaq üçün tətbiq ərzində yalnız 1 dəfə yoxlayacaq
+            if (_tableEnsured) return;
 
             try
             {
                 using (var conn = new SqlConnection(GetConnectionString()))
                 {
                     conn.Open();
-
+                    // GƏLƏCƏYƏ DÖNÜK: ErrorMessage nvarchar(max) olaraq təyin edilib ki, kəsilmə(Truncation) baş verməsin
                     string createTableSql = @"
                         IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[AtgData]') AND type in (N'U'))
                         BEGIN
@@ -178,7 +193,7 @@ namespace WindbellTest
                                 [Ullage] [float] NULL,
                                 [SensorStatus] [nvarchar](50) NULL,
                                 [ErrorCode] [nvarchar](50) NULL,
-                                [ErrorMessage] [nvarchar](255) NULL,
+                                [ErrorMessage] [nvarchar](max) NULL,
                                 [CreatedAt] [datetime] DEFAULT GETDATE()
                             )
                         END";
@@ -187,53 +202,88 @@ namespace WindbellTest
                     {
                         cmd.ExecuteNonQuery();
                     }
+                    _tableEnsured = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"\u26A0 AtgData cədvəli qurularkən və ya yoxlanılarkən xəta: {ex.Message}", ConsoleColor.Red);
+            }
+        }
 
+        static void SaveAtgDataToDatabase(AtgResponse response)
+        {
+            if (response?.data == null || response.data.Count == 0) return;
+
+            EnsureDatabaseTables();
+
+            try
+            {
+                using (var conn = new SqlConnection(GetConnectionString()))
+                {
+                    conn.Open();
                     string insertSql = @"
                         INSERT INTO [dbo].[AtgData] 
                         (RequestTimestamp, RequestId, TankId, ProductCode, OilLevel, WaterLevel, Temperature, Volume, WaterVolume, TcVolume, Capacity, Ullage, SensorStatus, ErrorCode, ErrorMessage) 
                         VALUES 
                         (@RequestTimestamp, @RequestId, @TankId, @ProductCode, @OilLevel, @WaterLevel, @Temperature, @Volume, @WaterVolume, @TcVolume, @Capacity, @Ullage, @SensorStatus, @ErrorCode, @ErrorMessage)";
 
-                    foreach (var tank in response.data)
+                    int successCount = 0;
+                    
+                    // GƏLƏCƏYƏ DÖNÜK DÜZƏLİŞ: Transaction istifadə edirik ki, məlumatların bir hissəsi yazılıb, digər hissəsi xəta verdikdə məlumat bazası korlanmasın (Bütünlüklə qəbul və ya ləğv edilir).
+                    using (var transaction = conn.BeginTransaction())
                     {
-                        using (var cmd = new SqlCommand(insertSql, conn))
+                        try
                         {
-                            cmd.Parameters.AddWithValue("@RequestTimestamp", response.metadata?.timestamp ?? (object)DBNull.Value);
-                            cmd.Parameters.AddWithValue("@RequestId", response.metadata?.request_id ?? (object)DBNull.Value);
-                            cmd.Parameters.AddWithValue("@TankId", tank.tank_id);
-                            cmd.Parameters.AddWithValue("@ProductCode", tank.product_code ?? (object)DBNull.Value);
-                            cmd.Parameters.AddWithValue("@OilLevel", tank.oil_level ?? (object)DBNull.Value);
-                            cmd.Parameters.AddWithValue("@WaterLevel", tank.water_level ?? (object)DBNull.Value);
-                            cmd.Parameters.AddWithValue("@Temperature", tank.temperature ?? (object)DBNull.Value);
-                            cmd.Parameters.AddWithValue("@Volume", tank.volume ?? (object)DBNull.Value);
-                            cmd.Parameters.AddWithValue("@WaterVolume", tank.water_volume ?? (object)DBNull.Value);
-                            cmd.Parameters.AddWithValue("@TcVolume", tank.tc_volume ?? (object)DBNull.Value);
-                            cmd.Parameters.AddWithValue("@Capacity", tank.capacity ?? (object)DBNull.Value);
-                            cmd.Parameters.AddWithValue("@Ullage", tank.Ullage ?? (object)DBNull.Value);
-                            cmd.Parameters.AddWithValue("@SensorStatus", tank.sensor_status ?? (object)DBNull.Value);
-                            
-                            if (tank.error != null)
+                            foreach (var tank in response.data)
                             {
-                                cmd.Parameters.AddWithValue("@ErrorCode", tank.error.code ?? (object)DBNull.Value);
-                                cmd.Parameters.AddWithValue("@ErrorMessage", tank.error.message ?? (object)DBNull.Value);
-                            }
-                            else
-                            {
-                                cmd.Parameters.AddWithValue("@ErrorCode", DBNull.Value);
-                                cmd.Parameters.AddWithValue("@ErrorMessage", DBNull.Value);
-                            }
+                                if (tank == null) continue;
 
-                            cmd.ExecuteNonQuery();
+                                using (var cmd = new SqlCommand(insertSql, conn, transaction))
+                                {
+                                    cmd.Parameters.AddWithValue("@RequestTimestamp", response.metadata?.timestamp ?? (object)DBNull.Value);
+                                    cmd.Parameters.AddWithValue("@RequestId", response.metadata?.request_id ?? (object)DBNull.Value);
+                                    cmd.Parameters.AddWithValue("@TankId", tank.tank_id);
+                                    cmd.Parameters.AddWithValue("@ProductCode", tank.product_code ?? (object)DBNull.Value);
+                                    cmd.Parameters.AddWithValue("@OilLevel", tank.oil_level ?? (object)DBNull.Value);
+                                    cmd.Parameters.AddWithValue("@WaterLevel", tank.water_level ?? (object)DBNull.Value);
+                                    cmd.Parameters.AddWithValue("@Temperature", tank.temperature ?? (object)DBNull.Value);
+                                    cmd.Parameters.AddWithValue("@Volume", tank.volume ?? (object)DBNull.Value);
+                                    cmd.Parameters.AddWithValue("@WaterVolume", tank.water_volume ?? (object)DBNull.Value);
+                                    cmd.Parameters.AddWithValue("@TcVolume", tank.tc_volume ?? (object)DBNull.Value);
+                                    cmd.Parameters.AddWithValue("@Capacity", tank.capacity ?? (object)DBNull.Value);
+                                    cmd.Parameters.AddWithValue("@Ullage", tank.Ullage ?? (object)DBNull.Value);
+                                    cmd.Parameters.AddWithValue("@SensorStatus", tank.sensor_status ?? (object)DBNull.Value);
+                                    
+                                    if (tank.error != null)
+                                    {
+                                        cmd.Parameters.AddWithValue("@ErrorCode", tank.error.code ?? (object)DBNull.Value);
+                                        cmd.Parameters.AddWithValue("@ErrorMessage", tank.error.message ?? (object)DBNull.Value);
+                                    }
+                                    else
+                                    {
+                                        cmd.Parameters.AddWithValue("@ErrorCode", DBNull.Value);
+                                        cmd.Parameters.AddWithValue("@ErrorMessage", DBNull.Value);
+                                    }
+
+                                    cmd.ExecuteNonQuery();
+                                    successCount++;
+                                }
+                            }
+                            transaction.Commit();
+                            Log($"\u2714 {successCount} çən məlumatı AtgData cədvəlinə uğurla yazıldı.", ConsoleColor.Green);
+                        }
+                        catch (Exception ex)
+                        {
+                            transaction.Rollback();
+                            Log($"\u26A0 Məlumatlar verilənlər bazasına yazılarkən xəta baş verdi, tam geriyə qaytarıldı (Rollback): {ex.Message}", ConsoleColor.Red);
                         }
                     }
-                    Console.WriteLine($"[\u2714] {response.data.Count} çən məlumatı AtgData cədvəlinə uğurla yazıldı.");
                 }
             }
             catch (Exception ex)
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"[\u26A0] AtgData cədvəlinə məlumat yazılarkən xəta baş verdi: {ex.Message}");
-                Console.ResetColor();
+                Log($"\u26A0 Database-ə bağlanmaq mümkün olmadı: {ex.Message}", ConsoleColor.Red);
             }
         }
 
@@ -242,207 +292,285 @@ namespace WindbellTest
             // Konsolda Azərbaycan dilini (Ü,Ö,Ğ,Ç,Ş,I,Ə) tam dəstəkləmək üçün
             Console.OutputEncoding = Encoding.UTF8;
 
+            // Proqramın məcburi/təhlükəsiz dayandırılması (Ctrl+C basıldıqda)
+            Console.CancelKeyPress += (sender, e) =>
+            {
+                e.Cancel = true;
+                Log("Proqram istifadəçi tərəfindən dayandırılır...", ConsoleColor.DarkYellow);
+                _cts.Cancel();
+            };
+
             int devicePort = 5656;
             string deviceIp = null;
 
-            Console.WriteLine($"--- Windbell WB-SS200 Test Başladı ---");
+            Log("--- Windbell WB-SS200 Test Başladı ---", ConsoleColor.Cyan);
 
-            while (true)
+            try
             {
-                int tankCount = GetTankCountFromDatabase();
-                if (tankCount <= 0)
+                while (!_cts.Token.IsCancellationRequested)
                 {
-                    tankCount = 1; // Ehtiyat variant
-                }
+                    int tankCount = GetTankCountFromDatabase();
 
-                Console.WriteLine($"\n--- Oxunacaq çən sayı: {tankCount} ---");
+                    Log($"\n--- Oxunacaq çən sayı: {tankCount} ---", ConsoleColor.DarkGray);
 
-                int maxRetries = 3;
-                bool connectionSuccess = false;
+                    int maxRetries = 3;
+                    bool connectionSuccess = false;
 
-                if (string.IsNullOrEmpty(deviceIp))
-                {
-                    deviceIp = GetIpFromDatabase();
-                }
-
-                if (string.IsNullOrEmpty(deviceIp))
-                {
-                    Console.Write($"\nBazada IP ünvanı tapılmadı.\nZəhmət olmasa IP ünvanı daxil edin: ");
-                    deviceIp = Console.ReadLine()?.Trim();
-                    if (!string.IsNullOrEmpty(deviceIp))
+                    if (string.IsNullOrEmpty(deviceIp))
                     {
-                        UpdateIpInDatabase(deviceIp);
+                        deviceIp = GetIpFromDatabase();
                     }
-                }
 
-                Console.WriteLine($"\n[{deviceIp}:{devicePort}] cihazına qoşulmağa cəhd edilir...");
-
-                for (int attempt = 1; attempt <= maxRetries; attempt++)
-                {
-                    try
+                    if (string.IsNullOrEmpty(deviceIp))
                     {
-                        using (TcpClient client = new TcpClient())
+                        Console.ForegroundColor = ConsoleColor.Yellow;
+                        Console.Write($"\nBazada IP ünvanı tapılmadı.\nZəhmət olmasa IP ünvanı daxil edin: ");
+                        Console.ResetColor();
+
+                        // Ctrl+C edilibsə bura kəsiləcək. Konsolu dondurmaması üçün sadəcə oxuma gözləyirik.
+                        string inputIp = Console.ReadLine()?.Trim();
+                        if (!string.IsNullOrEmpty(inputIp))
                         {
-                            // Qoşulmağa cəhd (3 saniyə timeout)
-                            var connectTask = client.ConnectAsync(deviceIp, devicePort);
-                            if (await Task.WhenAny(connectTask, Task.Delay(3000)) != connectTask)
+                            deviceIp = inputIp;
+                            UpdateIpInDatabase(deviceIp);
+                        }
+                        else 
+                        {
+                            Log("IP ünvan daxil edilmədi. Cəhd 2 saniyə sonra yenilənəcək...", ConsoleColor.Yellow);
+                            try { await Task.Delay(2000, _cts.Token); } catch (TaskCanceledException) { break; }
+                            continue;
+                        }
+                    }
+
+                    Log($"[{deviceIp}:{devicePort}] cihazına qoşulmağa cəhd edilir...", ConsoleColor.Cyan);
+
+                    for (int attempt = 1; attempt <= maxRetries; attempt++)
+                    {
+                        if (_cts.Token.IsCancellationRequested) break;
+
+                        try
+                        {
+                            using (TcpClient client = new TcpClient())
                             {
-                                throw new Exception("Bağlantı vaxtı bitdi (Timeout).");
-                            }
-
-                            using (NetworkStream stream = client.GetStream())
-                            {
-                                // 1. Sorğu komandası 
-                                var tankList = new List<string>();
-                                for (int i = 1; i <= tankCount; i++)
+                                // Qoşulmağa cəhd. 5 saniyə timeout - donmaların (sonsuz gözləmələrin) qarşısını almaq üçün təhlükəsizdir
+                                var connectTask = client.ConnectAsync(deviceIp, devicePort);
+                                if (await Task.WhenAny(connectTask, Task.Delay(5000, _cts.Token)) != connectTask)
                                 {
-                                    tankList.Add($"\"Tank{i}\"");
-                                }
-                                string request = $"{{\"tanks\": [{string.Join(", ", tankList)}], \"requestType\": \"status\"}}";
-                                byte[] requestBytes = Encoding.UTF8.GetBytes(request);
-                                await stream.WriteAsync(requestBytes, 0, requestBytes.Length);
-
-                                // 2. Cavabı tam göndərilənədək oxumaq
-                                StringBuilder responseBuilder = new StringBuilder();
-                                byte[] buffer = new byte[8192];
-                                AtgResponse result = null;
-                                var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-
-                                while (true)
-                                {
-                                    var readTask = stream.ReadAsync(buffer, 0, buffer.Length);
-                                    if (await Task.WhenAny(readTask, Task.Delay(5000)) != readTask) 
-                                    {
-                                        throw new Exception("Cihazdan sonrakı məlumatın gəlməsi gecikdi (Timeout).");
-                                    }
-
-                                    int bytesRead = await readTask;
-                                    if (bytesRead == 0)
-                                    {
-                                        throw new Exception("Bağlantı qarşı tərəfdən vaxtından əvvəl kəsildi.");
-                                    }
-
-                                    string chunk = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                                    responseBuilder.Append(chunk);
-                                    string currentResponse = responseBuilder.ToString();
-
-                                    try
-                                    {
-                                        result = JsonSerializer.Deserialize<AtgResponse>(currentResponse, options);
-                                        if (result != null)
-                                        {
-                                            break; // Tam ölçülü JSON
-                                        }
-                                    }
-                                    catch (JsonException)
-                                    {
-                                        // JSON hələ bitməyib, oxumağa davam et
-                                    }
+                                    throw new Exception("Bağlantı vaxtı bitdi (Timeout - 5 san). Server və ya cihaz əlçatmaz ola bilər.");
                                 }
 
-                                // 3. JSON-u ekrana çıxarmaq
-                                if (result != null && result.data != null)
+                                if (!client.Connected)
                                 {
-                                    SaveAtgDataToDatabase(result);
+                                    throw new Exception("Bağlantı qurula bilmədi.");
+                                }
 
-                                    Console.WriteLine($"\n===================== CİHAZ (ATG) MƏLUMATLARI =====================");
-                                    if (result.metadata != null)
-                                    {
-                                        Console.WriteLine($"   Datanın vaxtı: {result.metadata.timestamp} | Sorğu ID: {result.metadata.request_id}");
-                                    }
-                                    Console.WriteLine(new string('=', 67));
-
-                                    var receivedTanks = result.data.Select(t => t.tank_id).ToList();
-                                    var missingTanks = new List<int>();
+                                using (NetworkStream stream = client.GetStream())
+                                {
+                                    // 1. Sorğu komandası 
+                                    var tankList = new List<string>();
                                     for (int i = 1; i <= tankCount; i++)
                                     {
-                                        if (!receivedTanks.Contains(i))
-                                            missingTanks.Add(i);
+                                        tankList.Add($"\"Tank{i}\"");
                                     }
+                                    string request = $"{{\"tanks\": [{string.Join(", ", tankList)}], \"requestType\": \"status\"}}";
+                                    byte[] requestBytes = Encoding.UTF8.GetBytes(request);
+                                    await stream.WriteAsync(requestBytes, 0, requestBytes.Length, _cts.Token);
 
-                                    if (missingTanks.Count > 0)
-                                    {
-                                        Console.ForegroundColor = ConsoleColor.Yellow;
-                                        Console.WriteLine($" [\u26A0] XƏBƏRDARLIQ: Cihazdan aşağıdakı çənlərin məlumatı heç gəlmədi: {string.Join(", ", missingTanks)}");
-                                        Console.ResetColor();
-                                        Console.WriteLine(new string('-', 67));
-                                    }
+                                    // 2. Cavabı tam göndərilənədək yığıb oxumaq
+                                    StringBuilder responseBuilder = new StringBuilder();
+                                    byte[] buffer = new byte[8192];
+                                    AtgResponse result = null;
+                                    var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
 
-                                    foreach (var tank in result.data.OrderBy(t => t.tank_id))
+                                    while (true)
                                     {
-                                        if (tank.error != null)
+                                        var readTask = stream.ReadAsync(buffer, 0, buffer.Length, _cts.Token);
+                                        // GƏLƏCƏYƏ DÖNÜK YOXLANIŞ: Əgər cihaz datanı yarımçıq göndərib susarsa proqram donmasın. Max 10 saniyə.
+                                        if (await Task.WhenAny(readTask, Task.Delay(10000, _cts.Token)) != readTask) 
                                         {
-                                            Console.ForegroundColor = ConsoleColor.Red;
-                                            Console.WriteLine($" [ÇƏN {tank.tank_id}] XƏTA");
-                                            Console.WriteLine($" Səbəb: {tank.error.message} (Kod: {tank.error.code})");
-                                            Console.ResetColor();
+                                            throw new Exception("Cihazdan növbəti məlumatın gəlməsi gecikdi (Oxuma Timeout).");
+                                        }
+
+                                        int bytesRead = await readTask;
+                                        if (bytesRead == 0)
+                                        {
+                                            throw new Exception("Bağlantı qarşı tərəfdən gözlənilmədən kəsildi.");
+                                        }
+
+                                        string chunk = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                                        responseBuilder.Append(chunk);
+
+                                        // GƏLƏCƏYƏ DÖNÜK DÜZƏLİŞ: Davamlı sonsuz (zibil) data gələrsə RAM(Yaddaş) daşmasının qarşısını alırıq.
+                                        if (responseBuilder.Length > 5 * 1024 * 1024) 
+                                        {
+                                            throw new Exception("Cihazdan gələn məlumat həddindən artıq böyükdür (Yaddaş qorunması tetikləndi).");
+                                        }
+
+                                        string currentResponse = responseBuilder.ToString();
+
+                                        try
+                                        {
+                                            // Təkrar gələn zibil null xarakterlərini təmizləyirik (Bəzi cihazlar \0 əlavə edir)
+                                            string trimmed = currentResponse.Replace("\0", "").Trim();
+                                            // Performanslı Yoxlama: JSON-un tam bitməsini ancaq `{` ilə başlayıb `}` ilə bitməsindən müəyyən edirik. 
+                                            // Lazımsız Exception-ların (CPU yükləməsinin) qarşısını alır.
+                                            if (trimmed.StartsWith("{") && trimmed.EndsWith("}"))
+                                            {
+                                                result = JsonSerializer.Deserialize<AtgResponse>(currentResponse, options);
+                                                if (result != null)
+                                                {
+                                                    break; // Tam ölçülü və etibarlı JSON oxundu
+                                                }
+                                            }
+                                        }
+                                        catch (JsonException)
+                                        {
+                                            // JSON hələ yarımçıqdır (sintaksis tam deyil), oxumağa davam edir (Buffer böyütmə normaldır)
+                                        }
+                                    }
+
+                                    // 3. JSON-u ekrana çıxarmaq
+                                    if (result != null && result.data != null)
+                                    {
+                                        // "eyni məlumatların 2-ci dəfə bazaya gedib consol-da çıxmama" xətasının dəqiq həlli: 
+                                        // Yalnız tank məlumatları fiziki olaraq dəyişdikdə bazaya insert edirik.
+                                        string currentDataJson = JsonSerializer.Serialize(result.data.Where(t => t != null).OrderBy(t => t.tank_id));
+                                        
+                                        bool isDataChanged = currentDataJson != _lastAtgDataCache;
+                                        if (isDataChanged)
+                                        {
+                                            SaveAtgDataToDatabase(result);
+                                            _lastAtgDataCache = currentDataJson;
                                         }
                                         else
                                         {
-                                            bool isMissingParams = tank.oil_level == null || tank.volume == null || tank.temperature == null;
+                                            // Eyni məlumat gəlibsə təkrar insert qadağan edilir, yalnız console-da tarix yenillənib göstərilir
+                                            Log("[\u2139] Çən göstəriciləri əvvəlki oxuma ilə tam eynidir. Ekranı doldurmamaq və bazanı (DB) təkrarlamamaq üçün əlavə edilmədi.", ConsoleColor.DarkGray);
+                                        }
 
-                                            Console.ForegroundColor = ConsoleColor.Cyan;
-                                            Console.WriteLine($" [ÇƏN {tank.tank_id}] MƏHSUL: {tank.product_code ?? "Bilinmir"} | STATUS: {tank.sensor_status?.ToUpper() ?? "BİLİNMİR"}");
-                                            Console.ResetColor();
-
-                                            if (isMissingParams)
+                                        if (isDataChanged)
+                                        {
+                                            try 
                                             {
-                                                Console.ForegroundColor = ConsoleColor.Yellow;
-                                                Console.WriteLine($"  [\u26A0] Diqqət: Çəndən gələn məlumatda bəzi fiziki dəyərlər (həcm, temperatur və s.) yarımçıqdır!");
-                                                Console.ResetColor();
+                                                Console.WriteLine($"\n================ CİHAZ (ATG) MƏLUMATLARI ({DateTime.Now:HH:mm:ss}) ================");
+                                            if (result.metadata != null)
+                                            {
+                                                Console.WriteLine($"   Datanın vaxtı: {result.metadata.timestamp} | Sorğu ID: {result.metadata.request_id}");
+                                            }
+                                            Console.WriteLine(new string('=', 67));
+
+                                            var receivedTanks = result.data.Where(t => t != null).Select(t => t.tank_id).ToList();
+                                            var missingTanks = new List<int>();
+                                            for (int i = 1; i <= tankCount; i++)
+                                            {
+                                                if (!receivedTanks.Contains(i))
+                                                    missingTanks.Add(i);
                                             }
 
-                                            Console.WriteLine($"  ► Səviyyə:   Yanacaq: {tank.oil_level?.ToString() ?? "?"} mm | Su: {tank.water_level?.ToString() ?? "?"} mm | Boşluq (Ullage): {tank.Ullage?.ToString() ?? "?"} mm");
-                                            Console.WriteLine($"  ► Həcm:      Təmiz həcm (Tc): {tank.tc_volume?.ToString() ?? "?"} L | Ümumi həcm: {tank.volume?.ToString() ?? "?"} L | Su həcmi: {tank.water_volume?.ToString() ?? "?"} L");
-                                            Console.WriteLine($"  ► Əlavə:     Tutum (Capacity): {tank.capacity?.ToString() ?? "?"} L | Temperatur: {tank.temperature?.ToString() ?? "?"} °C");
+                                            if (missingTanks.Count > 0)
+                                            {
+                                                Console.ForegroundColor = ConsoleColor.Yellow;
+                                                Console.WriteLine($" [\u26A0] XƏBƏRDARLIQ: Cihazdan aşağıdakı çənlərin məlumatı heç gəlmədi: {string.Join(", ", missingTanks)}");
+                                                Console.ResetColor();
+                                                Console.WriteLine(new string('-', 67));
+                                            }
+
+                                            foreach (var tank in result.data.Where(t => t != null).OrderBy(t => t.tank_id))
+                                            {
+                                                if (tank.error != null)
+                                                {
+                                                    Console.ForegroundColor = ConsoleColor.Red;
+                                                    Console.WriteLine($" [ÇƏN {tank.tank_id}] XƏTA GƏLDİ");
+                                                    Console.WriteLine($" Səbəb: {tank.error.message} (Kod: {tank.error.code})");
+                                                    Console.ResetColor();
+                                                }
+                                                else
+                                                {
+                                                    bool isMissingParams = tank.oil_level == null || tank.volume == null || tank.temperature == null;
+
+                                                    Console.ForegroundColor = ConsoleColor.Cyan;
+                                                    Console.WriteLine($" [ÇƏN {tank.tank_id}] MƏHSUL: {tank.product_code ?? "Bilinmir"} | STATUS: {tank.sensor_status?.ToUpper() ?? "BİLİNMİR"}");
+                                                    Console.ResetColor();
+
+                                                    if (isMissingParams)
+                                                    {
+                                                        Console.ForegroundColor = ConsoleColor.Yellow;
+                                                        Console.WriteLine($"  [\u26A0] Diqqət: Çəndən gələn məlumatda bəzi fiziki dəyərlər (həcm, səviyyə və ya temperatur) yarımçıqdır!");
+                                                        Console.ResetColor();
+                                                    }
+
+                                                    Console.WriteLine($"  ► Səviyyə:   Yanacaq: {tank.oil_level?.ToString() ?? "?"} mm | Su: {tank.water_level?.ToString() ?? "?"} mm | Boşluq (Ullage): {tank.Ullage?.ToString() ?? "?"} mm");
+                                                    Console.WriteLine($"  ► Həcm:      Təmiz həcm (Tc): {tank.tc_volume?.ToString() ?? "?"} L | Ümumi həcm: {tank.volume?.ToString() ?? "?"} L | Su həcmi: {tank.water_volume?.ToString() ?? "?"} L");
+                                                    Console.WriteLine($"  ► Əlavə:     Tutum (Capacity): {tank.capacity?.ToString() ?? "?"} L | Temperatur: {tank.temperature?.ToString() ?? "?"} °C");
+                                                }
+                                                Console.WriteLine(new string('-', 67));
+                                            }
                                         }
-                                        Console.WriteLine(new string('-', 67));
+                                            catch(Exception consoleEx)
+                                            {
+                                                // Konsol çıxarışında hər hansı bug yaranarsa proqramın donmasının qarşısını almaq üçün təhlükəsizlik
+                                                Log($"[\u26A0] Konsola məlumat yazılarkən xəta: {consoleEx.Message}", ConsoleColor.Yellow);
+                                            }
+                                        }
                                     }
                                 }
                             }
+
+                            connectionSuccess = true;
+                            break; 
                         }
-
-                        connectionSuccess = true;
-                        break; 
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.ForegroundColor = ConsoleColor.Red;
-                        Console.WriteLine($"\nXəta (Cəhd {attempt}/{maxRetries}): {ex.Message}");
-                        Console.ResetColor();
-
-                        if (attempt < maxRetries)
+                        catch (Exception ex)
                         {
-                            Console.WriteLine("2 saniyə sonra yenidən cəhd edilir...");
-                            await Task.Delay(2000); 
+                            Log($"Xəta (Cəhd {attempt}/{maxRetries}): {ex.Message}", ConsoleColor.Red);
+
+                            if (attempt < maxRetries && !_cts.Token.IsCancellationRequested)
+                            {
+                                Log("2 saniyə sonra yenidən cəhd edilir...", ConsoleColor.DarkYellow);
+                                try { await Task.Delay(2000, _cts.Token); } catch (TaskCanceledException) { break; }
+                            }
                         }
-                    }
-                } // for loop sonu
+                    } // for loop sonu
+                    
+                    if (_cts.Token.IsCancellationRequested) break;
 
-                if (!connectionSuccess)
-                {
-                    Console.ForegroundColor = ConsoleColor.DarkRed;
-                    Console.WriteLine($"\n[MƏLUMAT KƏSİNTİSİ] Bütün {maxRetries} cəhdin hamısı uğursuz oldu.");
-                    Console.ResetColor();
-
-                    Console.Write("Zəhmət olmasa yeni IP ünvanı daxil edin: ");
-                    string newIp = Console.ReadLine()?.Trim();
-                    if (!string.IsNullOrEmpty(newIp))
+                    if (!connectionSuccess)
                     {
-                        deviceIp = newIp;
-                        UpdateIpInDatabase(deviceIp);
+                        Log($"\n[BAĞLANTI İTKİSİ] Bütün {maxRetries} cəhdin hamısı uğursuz oldu.", ConsoleColor.DarkRed);
+
+                        Console.ForegroundColor = ConsoleColor.Yellow;
+                        Console.Write("Zəhmət olmasa yeni IP ünvanı daxil edin (Boş buraxıb ENTER bassanız 30 saniyə gözləyəcək): ");
+                        Console.ResetColor();
+                        
+                        string newIp = Console.ReadLine()?.Trim();
+                        if (!string.IsNullOrEmpty(newIp))
+                        {
+                            deviceIp = newIp;
+                            UpdateIpInDatabase(deviceIp);
+                        }
+                        else
+                        {
+                            Log("Yeni ip ünvanı daxil edilmədi. 30 saniyə sonra təkrar yoxlanılacaq...", ConsoleColor.Cyan);
+                            try { await Task.Delay(30000, _cts.Token); } catch (TaskCanceledException) { break; }
+                        }
                     }
                     else
                     {
-                        Console.WriteLine("\n30 saniyə gözlənilir...");
-                        await Task.Delay(30000);
+                        Log("\nMəlumat oxuma tamamlandı. Yenidən oxumaq üçün 30 saniyə gözlənilir... (Dayandırmaq üçün Ctrl+C basın)", ConsoleColor.Green);
+                        try { await Task.Delay(30000, _cts.Token); } catch (TaskCanceledException) { break; }
                     }
                 }
-                else
-                {
-                    Console.WriteLine("\n30 saniyə gözlənilir... (Dayandırmaq üçün Ctrl+C)");
-                    await Task.Delay(30000);
-                }
+            }
+            catch (TaskCanceledException)
+            {
+                Log("Proqram istifadəçi tərəfindən (Ctrl+C) dayandırıldı.", ConsoleColor.Yellow);
+            }
+            catch (Exception ex)
+            {
+                Log($"Kritik xəta: {ex.Message}", ConsoleColor.DarkRed);
+            }
+            finally
+            {
+                Log("Proqramdan çıxılır...", ConsoleColor.White);
             }
         }
     }
