@@ -149,24 +149,114 @@ namespace WindbellTest
             }
         }
 
+        static void SaveAtgDataToDatabase(AtgResponse response)
+        {
+            if (response == null || response.data == null) return;
+
+            try
+            {
+                using (var conn = new SqlConnection(GetConnectionString()))
+                {
+                    conn.Open();
+
+                    string createTableSql = @"
+                        IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[AtgData]') AND type in (N'U'))
+                        BEGIN
+                            CREATE TABLE [dbo].[AtgData](
+                                [Id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                                [RequestTimestamp] [nvarchar](50) NULL,
+                                [RequestId] [nvarchar](50) NULL,
+                                [TankId] [int] NULL,
+                                [ProductCode] [nvarchar](50) NULL,
+                                [OilLevel] [float] NULL,
+                                [WaterLevel] [float] NULL,
+                                [Temperature] [float] NULL,
+                                [Volume] [float] NULL,
+                                [WaterVolume] [float] NULL,
+                                [TcVolume] [float] NULL,
+                                [Capacity] [float] NULL,
+                                [Ullage] [float] NULL,
+                                [SensorStatus] [nvarchar](50) NULL,
+                                [ErrorCode] [nvarchar](50) NULL,
+                                [ErrorMessage] [nvarchar](255) NULL,
+                                [CreatedAt] [datetime] DEFAULT GETDATE()
+                            )
+                        END";
+
+                    using (var cmd = new SqlCommand(createTableSql, conn))
+                    {
+                        cmd.ExecuteNonQuery();
+                    }
+
+                    string insertSql = @"
+                        INSERT INTO [dbo].[AtgData] 
+                        (RequestTimestamp, RequestId, TankId, ProductCode, OilLevel, WaterLevel, Temperature, Volume, WaterVolume, TcVolume, Capacity, Ullage, SensorStatus, ErrorCode, ErrorMessage) 
+                        VALUES 
+                        (@RequestTimestamp, @RequestId, @TankId, @ProductCode, @OilLevel, @WaterLevel, @Temperature, @Volume, @WaterVolume, @TcVolume, @Capacity, @Ullage, @SensorStatus, @ErrorCode, @ErrorMessage)";
+
+                    foreach (var tank in response.data)
+                    {
+                        using (var cmd = new SqlCommand(insertSql, conn))
+                        {
+                            cmd.Parameters.AddWithValue("@RequestTimestamp", response.metadata?.timestamp ?? (object)DBNull.Value);
+                            cmd.Parameters.AddWithValue("@RequestId", response.metadata?.request_id ?? (object)DBNull.Value);
+                            cmd.Parameters.AddWithValue("@TankId", tank.tank_id);
+                            cmd.Parameters.AddWithValue("@ProductCode", tank.product_code ?? (object)DBNull.Value);
+                            cmd.Parameters.AddWithValue("@OilLevel", tank.oil_level ?? (object)DBNull.Value);
+                            cmd.Parameters.AddWithValue("@WaterLevel", tank.water_level ?? (object)DBNull.Value);
+                            cmd.Parameters.AddWithValue("@Temperature", tank.temperature ?? (object)DBNull.Value);
+                            cmd.Parameters.AddWithValue("@Volume", tank.volume ?? (object)DBNull.Value);
+                            cmd.Parameters.AddWithValue("@WaterVolume", tank.water_volume ?? (object)DBNull.Value);
+                            cmd.Parameters.AddWithValue("@TcVolume", tank.tc_volume ?? (object)DBNull.Value);
+                            cmd.Parameters.AddWithValue("@Capacity", tank.capacity ?? (object)DBNull.Value);
+                            cmd.Parameters.AddWithValue("@Ullage", tank.Ullage ?? (object)DBNull.Value);
+                            cmd.Parameters.AddWithValue("@SensorStatus", tank.sensor_status ?? (object)DBNull.Value);
+                            
+                            if (tank.error != null)
+                            {
+                                cmd.Parameters.AddWithValue("@ErrorCode", tank.error.code ?? (object)DBNull.Value);
+                                cmd.Parameters.AddWithValue("@ErrorMessage", tank.error.message ?? (object)DBNull.Value);
+                            }
+                            else
+                            {
+                                cmd.Parameters.AddWithValue("@ErrorCode", DBNull.Value);
+                                cmd.Parameters.AddWithValue("@ErrorMessage", DBNull.Value);
+                            }
+
+                            cmd.ExecuteNonQuery();
+                        }
+                    }
+                    Console.WriteLine($"[\u2714] {response.data.Count} çən məlumatı AtgData cədvəlinə uğurla yazıldı.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"[\u26A0] AtgData cədvəlinə məlumat yazılarkən xəta baş verdi: {ex.Message}");
+                Console.ResetColor();
+            }
+        }
+
         static async Task Main(string[] args)
         {
             // Konsolda Azərbaycan dilini (Ü,Ö,Ğ,Ç,Ş,I,Ə) tam dəstəkləmək üçün
             Console.OutputEncoding = Encoding.UTF8;
 
             int devicePort = 5656;
-            int tankCount = GetTankCountFromDatabase();
-            if (tankCount <= 0)
-            {
-                tankCount = 1; // Ehtiyat variant
-            }
             string deviceIp = null;
 
             Console.WriteLine($"--- Windbell WB-SS200 Test Başladı ---");
-            Console.WriteLine($"--- Oxunacaq çən sayı: {tankCount} ---");
 
             while (true)
             {
+                int tankCount = GetTankCountFromDatabase();
+                if (tankCount <= 0)
+                {
+                    tankCount = 1; // Ehtiyat variant
+                }
+
+                Console.WriteLine($"\n--- Oxunacaq çən sayı: {tankCount} ---");
+
                 int maxRetries = 3;
                 bool connectionSuccess = false;
 
@@ -253,6 +343,8 @@ namespace WindbellTest
                                 // 3. JSON-u ekrana çıxarmaq
                                 if (result != null && result.data != null)
                                 {
+                                    SaveAtgDataToDatabase(result);
+
                                     Console.WriteLine($"\n===================== CİHAZ (ATG) MƏLUMATLARI =====================");
                                     if (result.metadata != null)
                                     {
