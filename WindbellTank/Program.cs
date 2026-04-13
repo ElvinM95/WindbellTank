@@ -52,6 +52,30 @@ namespace WindbellTest
             return $"Server={machineName};Database=ofisServer;User Id=sa;Password=374474;Encrypt=False;";
         }
 
+        static int GetTankCountFromDatabase()
+        {
+            try
+            {
+                using (var conn = new SqlConnection(GetConnectionString()))
+                {
+                    conn.Open();
+                    using (var cmd = new SqlCommand("SELECT COUNT(*) FROM TankConfig", conn))
+                    {
+                        var res = cmd.ExecuteScalar();
+                        if (res != null && res != DBNull.Value)
+                        {
+                            return Convert.ToInt32(res);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[\u26A0] Verilənlər bazasından çən sayı oxunarkən xəta: {ex.Message}");
+            }
+            return 0;
+        }
+
         static string GetIpFromDatabase()
         {
             try
@@ -131,33 +155,12 @@ namespace WindbellTest
             Console.OutputEncoding = Encoding.UTF8;
 
             int devicePort = 5656;
-            int tankCount = 1; // Default çən sayı
+            int tankCount = GetTankCountFromDatabase();
+            if (tankCount <= 0)
+            {
+                tankCount = 1; // Ehtiyat variant
+            }
             string deviceIp = null;
-
-            // C:\Abak\STPARAM.ini faylından oxumaq
-            string iniFilePath = @"C:\Abak\STPARAM.ini";
-            try
-            {
-                if (System.IO.File.Exists(iniFilePath))
-                {
-                    string[] lines = System.IO.File.ReadAllLines(iniFilePath);
-                    foreach (string line in lines)
-                    {
-                        if (line.Trim().StartsWith("TANK_COUNT"))
-                        {
-                            var parts = line.Split('=');
-                            if (parts.Length > 1)
-                            {
-                                int.TryParse(parts[1].Trim(), out tankCount);
-                            }
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[\u26A0] Diqqət: INI faylı oxunarkən xəta baş verdi: {ex.Message}");
-            }
 
             Console.WriteLine($"--- Windbell WB-SS200 Test Başladı ---");
             Console.WriteLine($"--- Oxunacaq çən sayı: {tankCount} ---");
