@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("WindbellTank")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+5032d8d1b2baaddb704f60415750e4145a0115b2")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+9883b258fd44d195f00c0307b3bfc9177c9bef33")]
 [assembly: System.Reflection.AssemblyProductAttribute("WindbellTank")]
 [assembly: System.Reflection.AssemblyTitleAttribute("WindbellTank")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
